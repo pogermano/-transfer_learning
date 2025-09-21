@@ -1,3 +1,241 @@
+# Transfer Learning & Fine-Tuning – Image Classifier
+
+Learn how to train an **accurate** image classifier with **few examples** by leveraging a pre-trained neural network (e.g., **VGG16** trained on ImageNet). This README summarizes concepts, strategies, and provides a **hands-on example** (Keras/TensorFlow) of **feature extraction** and **fine-tuning**.
+
+> **What is transfer learning?**  
+> It’s the practice of reusing a model trained on a large dataset as the starting point for a new task, speeding up training and improving accuracy when you have **limited data**.
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Strategies](#strategies)
+  - [Feature extraction](#feature-extraction)
+  - [Fine-tuning](#fine-tuning)
+- [Data structure](#data-structure)
+- [Requirements](#requirements)
+- [Quick example (Keras/TensorFlow)](#quick-example-kerastensorflow)
+  - [From-scratch baseline (optional)](#from-scratch-baseline-optional)
+  - [Transfer learning with VGG16 (feature extraction)](#transfer-learning-with-vgg16-feature-extraction)
+  - [Fine-tuning (unfreezing final layers)](#fine-tuning-unfreezing-final-layers)
+- [Expected results](#expected-results)
+- [Best practices](#best-practices)
+- [References & reading](#references--reading)
+- [License](#license)
+
+---
+
+## Overview
+
+Training a network **from scratch** with a small dataset often leads to **overfitting** and low accuracy. With **transfer learning** you can:
+
+- Reuse pre-learned **feature extractors** (edges, textures, shapes).
+- Train **fewer parameters** with a **lower learning rate**.
+- Achieve **substantial** performance gains with limited data (e.g., hundreds of images).
+
+---
+
+## Strategies
+
+### Feature extraction
+- **Freeze** all layers of the pre-trained backbone (e.g., VGG16) and **replace the classification head** with yours (with your number of classes).
+- Train **only** the new head (fast, stable).
+
+### Fine-tuning
+- Start from the pre-trained model and **unfreeze** some final layers (more specific).
+- Use a **smaller learning rate**.
+- Useful when your dataset is reasonably sized and **similar** to the original dataset (ImageNet).
+
+> In practice, you can adopt a **hybrid** approach: keep early layers (generic) frozen and fine-tune only the final ones.
+
+---
+
+## Data structure
+
+Follow Keras `image_dataset_from_directory` convention:
+
+```
+data/
+  train/
+    class_1/ img001.jpg ...
+    class_2/ ...
+    ...
+  val/
+    class_1/ ...
+    class_2/ ...
+    ...
+```
+
+> Rename folders according to your classes. Works well for hundreds to a few thousand images.
+
+---
+
+## Requirements
+
+- Python 3.9+
+- TensorFlow 2.15+ (CPU or GPU)
+- (Optional) NVIDIA CUDA/cuDNN for GPU acceleration
+
+Quick setup:
+
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS/Linux
+source .venv/bin/activate
+
+pip install --upgrade pip
+pip install tensorflow matplotlib
+```
+
+---
+
+## Quick example (Keras/TensorFlow)
+
+> Adjust `DATA_DIR` and `NUM_CLASSES` to your project.
+
+```python
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from pathlib import Path
+
+DATA_DIR = "data"
+IMG_SIZE = (224, 224)
+BATCH = 32
+EPOCHS = 10
+
+train_ds = keras.utils.image_dataset_from_directory(
+    Path(DATA_DIR) / "train",
+    image_size=IMG_SIZE,
+    batch_size=BATCH,
+    label_mode="categorical",
+    shuffle=True,
+)
+val_ds = keras.utils.image_dataset_from_directory(
+    Path(DATA_DIR) / "val",
+    image_size=IMG_SIZE,
+    batch_size=BATCH,
+    label_mode="categorical",
+    shuffle=False,
+)
+
+NUM_CLASSES = len(train_ds.class_names)
+```
+
+### From-scratch baseline (optional)
+
+Train a small model from scratch for comparison:
+
+```python
+def build_baseline(num_classes):
+    inputs = keras.Input(shape=IMG_SIZE + (3,))
+    x = layers.Rescaling(1./255)(inputs)
+    x = layers.Conv2D(32, 3, activation="relu")(x)
+    x = layers.MaxPooling2D()(x)
+    x = layers.Conv2D(64, 3, activation="relu")(x)
+    x = layers.MaxPooling2D()(x)
+    x = layers.Flatten()(x)
+    x = layers.Dense(128, activation="relu")(x)
+    outputs = layers.Dense(num_classes, activation="softmax")(x)
+    return keras.Model(inputs, outputs)
+
+baseline = build_baseline(NUM_CLASSES)
+baseline.compile(optimizer="adam",
+                 loss="categorical_crossentropy",
+                 metrics=["accuracy"])
+baseline.fit(train_ds, validation_data=val_ds, epochs=EPOCHS)
+```
+
+### Transfer learning with VGG16 (feature extraction)
+
+```python
+base = keras.applications.VGG16(
+    weights="imagenet", include_top=False, input_shape=IMG_SIZE + (3,)
+)
+base.trainable = False  # freeze ALL layers
+
+inputs = keras.Input(shape=IMG_SIZE + (3,))
+x = keras.applications.vgg16.preprocess_input(inputs)
+x = base(x, training=False)
+x = layers.GlobalAveragePooling2D()(x)
+x = layers.Dropout(0.2)(x)
+outputs = layers.Dense(NUM_CLASSES, activation="softmax")(x)
+
+model = keras.Model(inputs, outputs)
+model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+    loss="categorical_crossentropy",
+    metrics=["accuracy"]
+)
+
+history_fe = model.fit(train_ds, validation_data=val_ds, epochs=EPOCHS)
+```
+
+### Fine-tuning (unfreezing final layers)
+
+After some **feature extraction** epochs, fine-tune the last layers:
+
+```python
+# Partially unfreeze the backbone (e.g., last conv block)
+for layer in base.layers:
+    layer.trainable = False
+for layer in base.layers[-12:]:  # adjust slicing as needed
+    layer.trainable = True
+
+model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=1e-4),  # smaller LR
+    loss="categorical_crossentropy",
+    metrics=["accuracy"]
+)
+
+history_ft = model.fit(train_ds, validation_data=val_ds, epochs=max(5, EPOCHS//2))
+```
+
+> **Tip:** Start with `base.trainable = False`. When validation stabilizes, unfreeze a **few** final layers and reduce LR.
+
+---
+
+## Expected results
+
+- With datasets of ~**6,000 images** and **97 classes**, reaching **~80%** accuracy is common (varies by domain/balance).
+- With **very few samples**, transfer learning generally outperforms from-scratch training.
+
+---
+
+## Best practices
+
+- **Balance** classes (or use balancing/augmentation techniques).
+- Use moderate **data augmentation** (flip, rotate, color jitter).
+- **Early stopping** + **best model checkpoint**.
+- **Lower LR** during fine-tuning.
+- Keep **early layers** (generic) frozen and adjust **final layers** (specific).
+
+---
+
+## References & reading
+
+- **VGG16**: classic architecture (ILSVRC 2014 winner).  
+- **ImageNet**: large-scale dataset used for pretraining.  
+- **Transfer Learning & Fine-Tuning**: TensorFlow/Keras and PyTorch docs.
+
+> The optimal strategy depends on **dataset size**, **number of classes**, and **similarity** to the pretraining dataset.
+
+---
+
+## License
+
+This project/README is licensed under **MIT**. Feel free to use, adapt, and share.
+
+---
+
+### ⭐ Give it a star!
+If this README helped you, please leave a ⭐ on the repo. Contributions and PRs are welcome!
+
+
+
 # Transfer Learning & Fine-Tuning – Classificador de Imagens
 
 Aprenda a treinar um classificador de imagens **preciso** usando **poucos exemplos**, reaproveitando o conhecimento de uma rede neural pré-treinada (ex.: **VGG16** treinada no ImageNet). Este README resume conceitos, estratégias e traz um **exemplo prático** (Keras/TensorFlow) de **feature extraction** e **fine-tuning**.
